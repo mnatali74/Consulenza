@@ -726,40 +726,249 @@ def crea_report(dati_anag, dati_zoo, dati_app, mappe_img, out_path="Report_Campo
 # 4. INTERFACCIA GRADIO
 # ==============================================================================
 
+
+# ==============================================================================
+# 4. GESTIONE ERRORI
+# ==============================================================================
+
+class ElaborazioneError(Exception):
+    """Eccezione personalizzata per errori di elaborazione"""
+    pass
+
+
+class FileInvalidError(ElaborazioneError):
+    """File non valido o non supportato"""
+    pass
+
+
+class DatiMancantiError(ElaborazioneError):
+    """Dati necessari mancanti nel fascicolo"""
+    pass
+
+
+class DownloadError(ElaborazioneError):
+    """Errore nel download della cartografia"""
+    pass
+
+
+class GISError(ElaborazioneError):
+    """Errore nell'elaborazione GIS"""
+    pass
+
+
+def valida_file_pdf(file_path):
+    """Valida che il file sia un PDF valido e leggibile"""
+    if not file_path:
+        raise FileInvalidError("Nessun file fornito")
+    
+    if not file_path.lower().endswith('.pdf'):
+        raise FileInvalidError("Il file deve essere in formato PDF")
+    
+    try:
+        with pdfplumber.open(file_path) as pdf:
+            if len(pdf.pages) == 0:
+                raise FileInvalidError("Il file PDF e vuoto o corrotto")
+    except Exception as e:
+        raise FileInvalidError(f"Errore nella lettura del PDF: {str(e)}")
+
+
 def elabora_tutto_ui(file_pdf):
-    if file_pdf is None: 
-        return "⚠️ Errore: Nessun file caricato.", None
+    """Funzione principale per l'elaborazione tramite interfaccia Gradio"""
+    if file_pdf is None:
+        return "\u26a0\ufe0f **Errore:** Nessun file caricato. Seleziona un file PDF valido.", None
         
     try:
+        # Validazione file
+        valida_file_pdf(file_pdf.name)
+        
+        # Estrazione dati
         with pdfplumber.open(file_pdf.name) as pdf:
+            if len(pdf.pages) < 1:
+                raise FileInvalidError("Il PDF deve contenere almeno una pagina")
+            
             anag = estrai_anagrafica(pdf)
+            if not anag or anag.get('cuaa') == 'N/D' and anag.get('partita_iva') == 'N/D':
+                raise DatiMancantiError("Non sono stati trovati dati anagrafici validi (CUAA o Partita IVA)")
+            
             zoo = estrai_composizione_zootecnica(pdf)
             appz = estrai_piano_coltivazione(pdf)
         
+        if not appz:
+            raise DatiMancantiError("Non sono state trovate particelle catastali nel fascicolo")
+        
+        # Generazione mappe
         mappe = genera_mappe_fogli(appz)
         
+        # Creazione report
         out_name = "Report_Campo_Pascoli_Connessi.pdf"
         crea_report(anag, zoo, appz, mappe, out_name)
         
-        return "✅ **Elaborazione completata con successo!** Scarica il PDF dal riquadro sottostante.", out_name
+        # Statistiche finali
+        num_comuni = len(set(app['comune'] for app in appz))
+        num_particelle = len(appz)
+        sup_totale = sum(app['superficie_ha'] for app in appz)
+        
+        messaggio_successo = (
+            f"\u2705 **Elaborazione completata con successo!**\n\n"
+            f"\u2139 **Statistiche:**\n"
+            f"- Comuni: {num_comuni}\n"
+            f"- Particelle: {num_particelle}\n"
+            f"- Superficie totale: {sup_totale:.2f} Ha\n\n"
+            f"Scarica il PDF dal riquadro sottostante."
+        )
+        return messaggio_successo, out_name
+        
+    except FileInvalidError as e:
+        return f"\u274c **Errore di file:** {str(e)}", None
+    except DatiMancantiError as e:
+        return f"\u274c **Dati mancanti:** {str(e)}. Verifica che il fascicolo contenga tutte le sezioni necessarie.", None
+    except DownloadError as e:
+        return f"\u274c **Errore di download:** {str(e)}. Verifica la connessione internet.", None
+    except GISError as e:
+        return f"\u274c **Errore GIS:** {str(e)}. Potrebbe essere necessario scaricare manualmente la cartografia.", None
     except Exception as e:
-        return f"❌ **Errore durante l'elaborazione:** {str(e)}", None
+        return f"\u274c **Errore generico:** {str(e)}. Contatta l'amministratore se il problema persiste.", None
 
-with gr.Blocks(title="Generatore Report Pascoli Laga", theme=gr.themes.Soft()) as app:
-    gr.Markdown("### 📄 Generazione Automatica Report di Campo (Pascoli Connessi)")
-    gr.Markdown("L'applicazione estrae le informazioni dal Fascicolo Aziendale[span_0](start_span)[span_0](end_span), calcola il **riepilogo degli utilizzi per ogni foglio** e genera le **mappe satellitari georeferenziate** a larghezza piena con dettagli a riquadro.")
+with gr.Blocks(title="Generatore Report Pascoli", theme=gr.themes.Soft()) as app:
+    gr.Markdown("""
+    # \ud83d\udcc4 Generatore Report Pascoli Connessi
+    ### Applicazione per l'estrazione automatica di dati dal Fascicolo Aziendale
+    """)
     
     with gr.Row():
-        input_pdf = gr.File(label="1. Carica Fascicolo Aziendale (PDF)", file_types=[".pdf"])
-    
-    btn = gr.Button("2. Genera Report Completo", variant="primary")
+        with gr.Column(scale=3):
+            gr.Markdown("""
+            **Funzionalita:**
+            - \u2705 Estrazione automatica di dati anagrafici, zootecnici e catastali
+            - \u2705 Generazione di mappe GIS georeferenziate per tutti i comuni italiani
+            - \u2705 Caching automatico della cartografia per evitare download ripetuti
+            - \u2705 Creazione di report PDF professionali con riepiloghi e mappe
+            """)
+        
+        with gr.Column(scale=1):
+            gr.Markdown("""
+            **Istruzioni:**
+            1. Carica il Fascicolo Aziendale in PDF
+            2. Clicca su "Genera Report"
+            3. Attendi il completamento
+            4. Scarica il report generato
+            """)
     
     gr.Markdown("---")
     
-    status_testo = gr.Markdown("⏳ *In attesa di caricamento del file...*")
-    output_pdf = gr.File(label="3. 📥 Link per il Download del Report PDF")
+    with gr.Row():
+        input_pdf = gr.File(label="\ud83d\udce5 1. Carica Fascicolo Aziendale (PDF)", file_types=[".pdf"])
     
-    btn.click(fn=elabora_tutto_ui, inputs=input_pdf, outputs=[status_testo, output_pdf])
+    with gr.Row():
+        btn_genera = gr.Button("\u25b6\ufe0f 2. Genera Report Completo", variant="primary")
+        btn_pulisce = gr.Button("\ud83d\udd04 Pulisci", variant="secondary")
+    
+    gr.Markdown("---")
+    
+    with gr.Row():
+        with gr.Column(scale=2):
+            status_testo = gr.Markdown("\u23f3 *In attesa di caricamento del file...*")
+        with gr.Column(scale=1):
+            log_output = gr.Textbox(label="Log Dettagliato", lines=8, max_lines=10, interactive=False)
+    
+    with gr.Row():
+        output_pdf = gr.File(label="\ud83d\udce5 3. Scarica Report PDF Generato")
+    
+    # Funzione per pulire i campi
+    def pulisci_campi():
+        return None, "\u23f3 *Pronto per un nuovo file...", ""
+    
+    # Funzione wrapper con progress e log
+    def elabora_con_progress(file_pdf):
+        if file_pdf is None:
+            return "\u26a0\ufe0f **Errore:** Nessun file caricato.", None, ""
+        
+        try:
+            # Validazione file
+            valida_file_pdf(file_pdf.name)
+            log_msg = "\u2713 File PDF valido\n"
+            yield 0.2, "File valido. Estrazione dati anagrafici...", log_msg
+            
+            # Estrazione dati
+            with pdfplumber.open(file_pdf.name) as pdf:
+                anag = estrai_anagrafica(pdf)
+                log_msg += "\u2713 Dati anagrafici estratti\n"
+                yield 0.4, "Estrazione composizione zootecnica...", log_msg
+                
+                if not anag or anag.get('cuaa') == 'N/D' and anag.get('partita_iva') == 'N/D':
+                    raise DatiMancantiError("Non sono stati trovati dati anagrafici validi")
+                
+                zoo = estrai_composizione_zootecnica(pdf)
+                log_msg += "\u2713 Dati zootecnici estratti\n"
+                yield 0.5, "Estrazione piano di coltivazione...", log_msg
+                
+                appz = estrai_piano_coltivazione(pdf)
+                log_msg += "\u2713 Dati catastali estratti\n"
+                yield 0.6, "Generazione mappe GIS...", log_msg
+            
+            if not appz:
+                raise DatiMancantiError("Non sono state trovate particelle catastali")
+            
+            mappe = genera_mappe_fogli(appz)
+            log_msg += "\u2713 Mappe GIS generate\n"
+            yield 0.8, "Creazione report PDF...", log_msg
+            
+            out_name = "Report_Campo_Pascoli_Connessi.pdf"
+            crea_report(anag, zoo, appz, mappe, out_name)
+            log_msg += "\u2713 Report PDF creato\n"
+            yield 0.95, "Finalizzazione...", log_msg
+            
+            # Statistiche
+            num_comuni = len(set(app['comune'] for app in appz))
+            num_particelle = len(appz)
+            sup_totale = sum(app['superficie_ha'] for app in appz)
+            
+            messaggio_successo = (
+                f"\u2705 **Elaborazione completata con successo!**\n\n"
+                f"\u2139 **Statistiche:**\n"
+                f"- Comuni: {num_comuni}\n"
+                f"- Particelle: {num_particelle}\n"
+                f"- Superficie totale: {sup_totale:.2f} Ha\n\n"
+                f"Scarica il PDF dal riquadro sottostante."
+            )
+            
+            log_msg += "\u2713 Elaborazione completata\nTutti i dati sono stati processati correttamente"
+            yield 1.0, messaggio_successo, log_msg
+            return out_name
+            
+        except FileInvalidError as e:
+            err_msg = f"\u274c **Errore di file:** {str(e)}"
+            yield 1.0, err_msg, f"ERR: {str(e)}"
+            return None
+        except DatiMancantiError as e:
+            err_msg = f"\u274c **Dati mancanti:** {str(e)}"
+            yield 1.0, err_msg, f"ERR: {str(e)}"
+            return None
+        except DownloadError as e:
+            err_msg = f"\u274c **Errore di download:** {str(e)}"
+            yield 1.0, err_msg, f"ERR: {str(e)}"
+            return None
+        except GISError as e:
+            err_msg = f"\u274c **Errore GIS:** {str(e)}"
+            yield 1.0, err_msg, f"ERR: {str(e)}"
+            return None
+        except Exception as e:
+            err_msg = f"\u274c **Errore generico:** {str(e)}"
+            yield 1.0, err_msg, f"ERR: {str(e)}"
+            return None
+    
+    # Event handlers
+    btn_genera.click(
+        fn=elabora_con_progress,
+        inputs=input_pdf,
+        outputs=[status_testo, output_pdf, log_output]
+    )
+    
+    btn_pulisce.click(
+        fn=pulisci_campi,
+        inputs=[],
+        outputs=[input_pdf, status_testo, log_output]
+    )
 
 if __name__ == "__main__":
     app.launch()
