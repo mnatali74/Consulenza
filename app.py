@@ -14,11 +14,51 @@ from fpdf import FPDF
 import gradio as gr
 
 # ==============================================================================
+# VERIFICA MODULI ALL'AVVIO
+# ==============================================================================
+def verifica_import_moduli():
+    """Verifica che tutti i moduli necessari siano disponibili all'avvio"""
+    moduli_necessari = {
+        'pdfplumber': 'pdfplumber',
+        'pandas': 'pandas',
+        'geopandas': 'geopandas',
+        'matplotlib': 'matplotlib',
+        'contextily': 'contextily',
+        'shapely': 'shapely',
+        'fpdf': 'fpdf',
+        'gradio': 'gradio',
+        'requests': 'requests'
+    }
+    
+    for nome, modulo in moduli_necessari.items():
+        try:
+            __import__(modulo)
+            print(f"✓ Modulo '{nome}' caricato correttamente")
+        except ImportError:
+            raise ImportError(f"Modulo '{nome}' non trovato. Installalo con: pip install {nome}")
+
+# Esegui la verifica all'avvio
+verifica_import_moduli()
+
+# ==============================================================================
 # CONFIGURAZIONE GIS E COSTANTI
 # ==============================================================================
-PATH_ZIP_CARTOGRAFIA = "MARCHE.zip"
-URL_ZIP_MARCHE = "https://wfs.cartografia.agenziaentrate.gov.it/inspire/wfs/GetDataset.php?dataset=MARCHE.zip"
+# URL base per il download della cartografia dell'Agenzia delle Entrate
+URL_BASE_CARTOGRAFIA = "https://wfs.cartografia.agenziaentrate.gov.it/inspire/wfs/GetDataset.php?dataset="
+
+# Cartella per il caching delle mappe scaricate
+CARTELLA_CACHE_MAPPE = "./cache_mappe"
+
+# Cartella temporanea per l'estrazione dei file GML
 CARTELLA_ESTRAZIONE_GIS = "./cartografia_estratta_temp"
+
+# Lista di tutte le regioni italiane per il download
+REGIONI_ITALIANE = [
+    "ABRUZZO", "BASILICATA", "CALABRIA", "CAMPANIA", "EMILIA-ROMAGNA",
+    "FRIULI-VENEZIA-GIULIA", "LAZIO", "LIGURIA", "LOMBARDIA", "MARCHE",
+    "MOLISE", "PIEMONTE", "PUGLIA", "SARDEGNA", "SICILIA", "TOSCANA",
+    "TRENTINO-ALTO-ADIGE", "UMBRIA", "VALLE-D-AOSTA", "VENETO"
+]
 HEADER_PIANO = "PIANO DI COLTIVAZIONE - PARTICELLE CATASTALI"
 HEADER_ZOOTECNICA = "COMPOSIZIONE ZOOTECNICA"
 
@@ -219,18 +259,217 @@ def estrai_piano_coltivazione(pdf):
 # 2. GENERAZIONE MAPPE GIS (CONTORNI BIANCHI + NUMERO CENTRALE + RIQUADRI)
 # ==============================================================================
 
-def assicura_presenza_zip():
-    if not os.path.exists(PATH_ZIP_CARTOGRAFIA):
+def verifica_import_moduli():
+    """Verifica che tutti i moduli necessari siano disponibili all'avvio"""
+    moduli_necessari = {
+        'pdfplumber': 'pdfplumber',
+        'pandas': 'pandas',
+        'geopandas': 'geopandas',
+        'matplotlib': 'matplotlib',
+        'contextily': 'contextily',
+        'shapely': 'shapely',
+        'fpdf': 'fpdf',
+        'gradio': 'gradio',
+        'requests': 'requests'
+    }
+    
+    for nome, modulo in moduli_necessari.items():
         try:
-            print("Download cartografia WFS regionale in corso...")
-            response = requests.get(URL_ZIP_MARCHE, stream=True, timeout=120)
-            with open(PATH_ZIP_CARTOGRAFIA, "wb") as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk: f.write(chunk)
-        except Exception as e:
-            print(f"Errore download WFS: {e}")
+            __import__(modulo)
+            print(f"✓ Modulo '{nome}' caricato correttamente")
+        except ImportError:
+            raise ImportError(f"Modulo '{nome}' non trovato. Installalo con: pip install {nome}")
+
+def scarica_cartografia_regione(nome_regione):
+    """Scarica la cartografia di una specifica regione se non è già in cache"""
+    nome_file_zip = f"{nome_regione}.zip"
+    percorso_file = os.path.join(CARTELLA_CACHE_MAPPE, nome_file_zip)
+    
+    if os.path.exists(percorso_file):
+        print(f"Cartografia per {nome_regione} già presente in cache")
+        return percorso_file
+    
+    try:
+        print(f"Download cartografia WFS per {nome_regione} in corso...")
+        url_regione = f"{URL_BASE_CARTOGRAFIA}{nome_regione}.zip"
+        response = requests.get(url_regione, stream=True, timeout=120)
+        response.raise_for_status()
+        
+        os.makedirs(CARTELLA_CACHE_MAPPE, exist_ok=True)
+        with open(percorso_file, "wb") as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk: f.write(chunk)
+        print(f"Cartografia per {nome_regione} scaricata e salvata in cache")
+        return percorso_file
+    except Exception as e:
+        print(f"Errore download WFS per {nome_regione}: {e}")
+        return None
+
+def assicura_presenza_cartografia(comuni_target):
+    """Assicura che la cartografia per tutti i comuni target sia disponibile"""
+    regioni_necessarie = set()
+    
+    # Mappa provincia -> regione (basato su sigle provinciali ISTAT)
+    provincia_a_regione = {
+        # Abruzzo
+        "AQ": "ABRUZZO", "CH": "ABRUZZO", "PE": "ABRUZZO", "TE": "ABRUZZO",
+        # Basilicata
+        "MT": "BASILICATA", "PZ": "BASILICATA",
+        # Calabria
+        "CS": "CALABRIA", "CZ": "CALABRIA", "KR": "CALABRIA", "RC": "CALABRIA", "VV": "CALABRIA",
+        # Campania
+        "AV": "CAMPANIA", "BN": "CAMPANIA", "CE": "CAMPANIA", "NA": "CAMPANIA", "SA": "CAMPANIA",
+        # Emilia-Romagna
+        "BO": "EMILIA-ROMAGNA", "FC": "EMILIA-ROMAGNA", "FE": "EMILIA-ROMAGNA", 
+        "MO": "EMILIA-ROMAGNA", "PR": "EMILIA-ROMAGNA", "RA": "EMILIA-ROMAGNA",
+        "RE": "EMILIA-ROMAGNA", "RN": "EMILIA-ROMAGNA", "PC": "EMILIA-ROMAGNA",
+        # Friuli-Venezia Giulia
+        "GO": "FRIULI-VENEZIA-GIULIA", "PN": "FRIULI-VENEZIA-GIULIA", 
+        "TS": "FRIULI-VENEZIA-GIULIA", "UD": "FRIULI-VENEZIA-GIULIA",
+        # Lazio
+        "FR": "LAZIO", "LT": "LAZIO", "RI": "LAZIO", "RM": "LAZIO", "VT": "LAZIO",
+        # Liguria
+        "GE": "LIGURIA", "IM": "LIGURIA", "SP": "LIGURIA", "SV": "LIGURIA",
+        # Lombardia
+        "BG": "LOMBARDIA", "BS": "LOMBARDIA", "CO": "LOMBARDIA", "CR": "LOMBARDIA",
+        "LC": "LOMBARDIA", "LO": "LOMBARDIA", "MN": "LOMBARDIA", "MI": "LOMBARDIA",
+        "MB": "LOMBARDIA", "PV": "LOMBARDIA", "SO": "LOMBARDIA", "VA": "LOMBARDIA",
+        # Marche
+        "AN": "MARCHE", "AP": "MARCHE", "AS": "MARCHE", "FM": "MARCHE",
+        "MC": "MARCHE", "PU": "MARCHE",
+        # Molise
+        "CB": "MOLISE", "IS": "MOLISE",
+        # Piemonte
+        "AL": "PIEMONTE", "AT": "PIEMONTE", "BI": "PIEMONTE", "CN": "PIEMONTE",
+        "NO": "PIEMONTE", "TO": "PIEMONTE", "VC": "PIEMONTE", "VB": "PIEMONTE",
+        # Puglia
+        "BA": "PUGLIA", "BR": "PUGLIA", "FG": "PUGLIA", "LE": "PUGLIA",
+        "TA": "PUGLIA", "BT": "PUGLIA",
+        # Sardegna
+        "CA": "SARDEGNA", "CI": "SARDEGNA", "NU": "SARDEGNA", "OR": "SARDEGNA",
+        "OT": "SARDEGNA", "SS": "SARDEGNA", "VS": "SARDEGNA",
+        # Sicilia
+        "AG": "SICILIA", "CL": "SICILIA", "CT": "SICILIA", "EN": "SICILIA",
+        "ME": "SICILIA", "PA": "SICILIA", "RG": "SICILIA", "SR": "SICILIA", "TP": "SICILIA",
+        # Toscana
+        "AR": "TOSCANA", "FI": "TOSCANA", "GR": "TOSCANA", "LI": "TOSCANA",
+        "LU": "TOSCANA", "MS": "TOSCANA", "PI": "TOSCANA", "PO": "TOSCANA",
+        "PT": "TOSCANA", "SI": "TOSCANA",
+        # Trentino-Alto Adige
+        "BZ": "TRENTINO-ALTO-ADIGE", "TN": "TRENTINO-ALTO-ADIGE",
+        # Umbria
+        "PG": "UMBRIA", "TR": "UMBRIA",
+        # Valle d'Aosta
+        "AO": "VALLE-D-AOSTA",
+        # Veneto
+        "BL": "VENETO", "BS": "VENETO", "PD": "VENETO", "RO": "VENETO",
+        "TV": "VENETO", "VE": "VENETO", "VR": "VENETO", "VI": "VENETO"
+    }
+    
+    # Mappa comune -> regione per i capoluoghi e comuni principali
+    comune_a_regione = {
+        # Abruzzo
+        "L'AQUILA": "ABRUZZO", "TERAMO": "ABRUZZO", "PESCARA": "ABRUZZO", "CHIETI": "ABRUZZO",
+        "AVEZZANO": "ABRUZZO", "SULMONA": "ABRUZZO", "LANCIANO": "ABRUZZO", "VASTO": "ABRUZZO",
+        # Basilicata
+        "POTENZA": "BASILICATA", "MATERA": "BASILICATA", "MELFI": "BASILICATA",
+        # Calabria
+        "CATANZARO": "CALABRIA", "COSENZA": "CALABRIA", "REGGIO CALABRIA": "CALABRIA",
+        "CROTONE": "CALABRIA", "VIBO VALENTIA": "CALABRIA",
+        # Campania
+        "NAPOLI": "CAMPANIA", "SALERNO": "CAMPANIA", "CASERTA": "CAMPANIA",
+        "BENEVENTO": "CAMPANIA", "AVELLINO": "CAMPANIA",
+        # Emilia-Romagna
+        "BOLOGNA": "EMILIA-ROMAGNA", "MODENA": "EMILIA-ROMAGNA", "REGGIO EMILIA": "EMILIA-ROMAGNA",
+        "PARMA": "EMILIA-ROMAGNA", "PIACENZA": "EMILIA-ROMAGNA", "RAVENNA": "EMILIA-ROMAGNA",
+        "FERRARA": "EMILIA-ROMAGNA", "RIMINI": "EMILIA-ROMAGNA", "FORLI": "EMILIA-ROMAGNA",
+        # Friuli-Venezia Giulia
+        "TRIESTE": "FRIULI-VENEZIA-GIULIA", "UDINE": "FRIULI-VENEZIA-GIULIA",
+        "GORIZIA": "FRIULI-VENEZIA-GIULIA", "PORDENONE": "FRIULI-VENEZIA-GIULIA",
+        # Lazio
+        "ROMA": "LAZIO", "LATINA": "LAZIO", "FROSINONE": "LAZIO", "VITERBO": "LAZIO",
+        "RIETI": "LAZIO", "GUIDONIA MONTECELIO": "LAZIO", "TIVOLI": "LAZIO",
+        # Liguria
+        "GENOVA": "LIGURIA", "SAVONA": "LIGURIA", "IMPERIA": "LIGURIA", "LA SPEZIA": "LIGURIA",
+        # Lombardia
+        "MILANO": "LOMBARDIA", "BERGAMO": "LOMBARDIA", "BRESCIA": "LOMBARDIA",
+        "COMO": "LOMBARDIA", "CREMONA": "LOMBARDIA", "LECCO": "LOMBARDIA",
+        "LODI": "LOMBARDIA", "MANTOVA": "LOMBARDIA", "PAVIA": "LOMBARDIA",
+        "SONDRIO": "LOMBARDIA", "VARSESE": "LOMBARDIA",
+        # Marche
+        "ANCONA": "MARCHE", "PESARO": "MARCHE", "MACERATA": "MARCHE",
+        "FERMO": "MARCHE", "ASCOLI PICENO": "MARCHE", "SENIGALLIA": "MARCHE",
+        "JESI": "MARCHE", "FABRIANO": "MARCHE", "CIVITANOVA MARCHE": "MARCHE",
+        # Molise
+        "CAMPBASSO": "MOLISE", "ISERNIA": "MOLISE", "TERMOLI": "MOLISE",
+        # Piemonte
+        "TORINO": "PIEMONTE", "CUNEO": "PIEMONTE", "NOVARA": "PIEMONTE",
+        "ALESSANDRIA": "PIEMONTE", "ASTI": "PIEMONTE", "BIELLA": "PIEMONTE",
+        "VERCELLI": "PIEMONTE", "VERBANIA": "PIEMONTE",
+        # Puglia
+        "BARI": "PUGLIA", "FOGGIA": "PUGLIA", "LECCE": "PUGLIA",
+        "TARANTO": "PUGLIA", "BRINDISI": "PUGLIA", "ANDRIA": "PUGLIA",
+        "BARLETTA": "PUGLIA", "TRANI": "PUGLIA",
+        # Sardegna
+        "CAGLIARI": "SARDEGNA", "SASSARI": "SARDEGNA", "NUORO": "SARDEGNA",
+        "ORISTANO": "SARDEGNA", "ALGHERO": "SARDEGNA", "OLBIA": "SARDEGNA",
+        "QUARTU SANT'ELENA": "SARDEGNA",
+        # Sicilia
+        "PALERMO": "SICILIA", "CATANIA": "SICILIA", "MESSINA": "SICILIA",
+        "SYRACUSE": "SICILIA", "TRAPANI": "SICILIA", "AGRIGENTO": "SICILIA",
+        "CALTANISSETTA": "SICILIA", "ENNA": "SICILIA", "RAGUSA": "SICILIA",
+        # Toscana
+        "FIRENZE": "TOSCANA", "SIENA": "TOSCANA", "PISA": "TOSCANA",
+        "AREZZO": "TOSCANA", "GROSSETO": "TOSCANA", "LIVORNO": "TOSCANA",
+        "LUCCA": "TOSCANA", "MASSA": "TOSCANA", "PISTOIA": "TOSCANA",
+        "PRATO": "TOSCANA",
+        # Trentino-Alto Adige
+        "TRENTO": "TRENTINO-ALTO-ADIGE", "BOLZANO": "TRENTINO-ALTO-ADIGE",
+        "ROVERETO": "TRENTINO-ALTO-ADIGE", "MERANO": "TRENTINO-ALTO-ADIGE",
+        # Umbria
+        "PERUGIA": "UMBRIA", "TERNI": "UMBRIA",
+        "FOLIGNO": "UMBRIA", "SPOLETO": "UMBRIA", "ASSISI": "UMBRIA",
+        # Valle d'Aosta
+        "AOSTA": "VALLE-D-AOSTA",
+        # Veneto
+        "VENEZIA": "VENETO", "PADOVA": "VENETO", "VERONA": "VENETO",
+        "VICENZA": "VENETO", "TREVISO": "VENETO", "BELLUNO": "VENETO",
+        "ROVIGO": "VENETO"
+    }
+    
+    for comune in comuni_target:
+        comune_upper = comune.upper().replace("'", "").replace("-", " ")
+        
+        # 1. Cerca prima per provincia (più veloce e affidabile)
+        sigla_provincia = comune[:2].upper() if len(comune) >= 2 else ""
+        regione_trovata = provincia_a_regione.get(sigla_provincia)
+        
+        # 2. Se non trovato, cerca nel nome del comune
+        if not regione_trovata:
+            for com_key, reg in comune_a_regione.items():
+                if com_key.upper() in comune_upper or comune_upper in com_key.upper():
+                    regione_trovata = reg
+                    break
+        
+        # 3. Se ancora non trovato, usa Marche come default
+        if not regione_trovata:
+            regione_trovata = "MARCHE"
+            print(f"Attenzione: Non ho trovato la regione per il comune '{comune}'. Usato default: MARCHE")
+        
+        if regione_trovata:
+            regioni_necessarie.add(regione_trovata)
+    
+    # Scarica la cartografia per tutte le regioni necessarie
+    percorsi_zip = []
+    for regione in regioni_necessarie:
+        percorso = scarica_cartografia_regione(regione)
+        if percorso:
+            percorsi_zip.append(percorso)
+    
+    return percorsi_zip
 
 def estrai_gml_ricorsivamente(zip_path, cartella_dest, comuni_target):
+    """Estrae ricorsivamente i file GML dai file ZIP, filtrando per comuni target"""
     gml_files = []
     try:
         with zipfile.ZipFile(zip_path, "r") as z:
@@ -241,9 +480,11 @@ def estrai_gml_ricorsivamente(zip_path, cartella_dest, comuni_target):
                     gml_files.extend(estrai_gml_ricorsivamente(sub_zip, cartella_dest, comuni_target))
                     os.remove(sub_zip)
                 elif member.lower().endswith(".gml"):
-                    if any(com in base_name for com in comuni_target):
+                    # Controlla se il file GML contiene uno dei comuni target
+                    if any(com.upper() in base_name for com in comuni_target):
                         gml_files.append(z.extract(member, cartella_dest))
-    except: pass
+    except Exception as e:
+        print(f"Errore estrazione GML da {zip_path}: {e}")
     return gml_files
 
 def plot_gdf_to_file(gdf, out_name, title, focus_bounds=None):
@@ -275,8 +516,8 @@ def plot_gdf_to_file(gdf, out_name, title, focus_bounds=None):
     plt.close(fig)
 
 def genera_mappe_fogli(dati_appezzamenti):
-    assicura_presenza_zip()
-    
+    """Genera mappe GIS per tutti i comuni presenti nei dati, supportando multiple regioni"""
+    # Organizza i dati per comune e foglio
     target_data = {}
     for app in dati_appezzamenti:
         comune = app['comune'].upper()
@@ -291,18 +532,27 @@ def genera_mappe_fogli(dati_appezzamenti):
     os.makedirs(CARTELLA_ESTRAZIONE_GIS, exist_ok=True)
     
     comuni_target = list(target_data.keys())
-    gml_files = estrai_gml_ricorsivamente(PATH_ZIP_CARTOGRAFIA, CARTELLA_ESTRAZIONE_GIS, comuni_target)
+    
+    # Assicura che la cartografia per tutti i comuni target sia disponibile
+    zip_paths = assicura_presenza_cartografia(comuni_target)
+    
+    # Estrai tutti i file GML dai ZIP scaricati
+    all_gml_files = []
+    for zip_path in zip_paths:
+        if os.path.exists(zip_path):
+            all_gml_files.extend(estrai_gml_ricorsivamente(zip_path, CARTELLA_ESTRAZIONE_GIS, comuni_target))
     
     mappe_generate = {} # {(comune, foglio): [lista_immagini]}
     
-    for gml_path in gml_files:
+    for gml_path in all_gml_files:
         if not gml_path.endswith("_ple.gml"): continue
         try:
             gdf = gpd.read_file(gml_path)
             col_ref = "NATIONALCADASTRALREFERENCE" if "NATIONALCADASTRALREFERENCE" in gdf.columns else "NATIONALCADASTRALZONINGREFERENCE"
             
             for comune_t, fogli_dict in target_data.items():
-                if comune_t not in os.path.basename(gml_path).upper(): continue
+                gml_basename = os.path.basename(gml_path).upper()
+                if comune_t not in gml_basename: continue
                 
                 for foglio_t, particelle_t in fogli_dict.items():
                     foglio_pad = foglio_t.zfill(4)
@@ -346,6 +596,7 @@ def genera_mappe_fogli(dati_appezzamenti):
         except Exception as e:
             print(f"Errore parsing GML {gml_path}: {e}")
 
+    # Non eliminare la cartella cache, mantieni i file scaricati per il caching
     if os.path.exists(CARTELLA_ESTRAZIONE_GIS): shutil.rmtree(CARTELLA_ESTRAZIONE_GIS)
     return mappe_generate
 
@@ -482,7 +733,7 @@ def elabora_tutto_ui(file_pdf):
     try:
         with pdfplumber.open(file_pdf.name) as pdf:
             anag = estrai_anagrafica(pdf)
-            zoo = estrai_composizione_zootecnica_textmode(pdf)
+            zoo = estrai_composizione_zootecnica(pdf)
             appz = estrai_piano_coltivazione(pdf)
         
         mappe = genera_mappe_fogli(appz)
