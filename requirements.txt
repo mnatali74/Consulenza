@@ -1,11 +1,12 @@
 # Dipendenze per l'applicazione Generatore Report Pascoli
-# Versione: 1.0
+# Versione: 1.1 - Con supporto mappe 3D
 
 # Parsing PDF
 pdfplumber>=0.10.0
 
 # Gestione dati tabellari e geografici
 pandas>=2.0.0
+numpy>=1.24.0
 geopandas>=0.14.0
 
 # Operazioni geometriche
@@ -14,6 +15,10 @@ shapely>=2.0.0
 # Generazione grafici e mappe
 matplotlib>=3.7.0
 contextily>=1.3.0
+
+# Mappe 3D interattive
+plotly>=5.18.0
+scipy>=1.11.0
 
 # Creazione PDF
 fpdf2>=2.7.0

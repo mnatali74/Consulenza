@@ -3,15 +3,23 @@ import re
 import shutil
 import zipfile
 import requests
+import math
+import json
+import traceback
 import pdfplumber
 import pandas as pd
+import numpy as np
 import geopandas as gpd
 import matplotlib.pyplot as plt
 import matplotlib.patheffects as pe
+import matplotlib.colors as mcolors
 import contextily as ctx
-from shapely.geometry import box
-from fpdf import FPDF
+from shapely.geometry import box, Point
+from shapely import ops
+from fpdf2 import FPDF
+import plotly.graph_objects as go
 import gradio as gr
+from scipy.ndimage import gaussian_filter
 
 # ==============================================================================
 # VERIFICA MODULI ALL'AVVIO
@@ -21,13 +29,16 @@ def verifica_import_moduli():
     moduli_necessari = {
         'pdfplumber': 'pdfplumber',
         'pandas': 'pandas',
+        'numpy': 'numpy',
         'geopandas': 'geopandas',
         'matplotlib': 'matplotlib',
         'contextily': 'contextily',
         'shapely': 'shapely',
-        'fpdf': 'fpdf',
+        'fpdf2': 'fpdf2',
+        'plotly': 'plotly',
         'gradio': 'gradio',
-        'requests': 'requests'
+        'requests': 'requests',
+        'scipy': 'scipy'
     }
     
     for nome, modulo in moduli_necessari.items():
@@ -264,13 +275,16 @@ def verifica_import_moduli():
     moduli_necessari = {
         'pdfplumber': 'pdfplumber',
         'pandas': 'pandas',
+        'numpy': 'numpy',
         'geopandas': 'geopandas',
         'matplotlib': 'matplotlib',
         'contextily': 'contextily',
         'shapely': 'shapely',
-        'fpdf': 'fpdf',
+        'fpdf2': 'fpdf2',
+        'plotly': 'plotly',
         'gradio': 'gradio',
-        'requests': 'requests'
+        'requests': 'requests',
+        'scipy': 'scipy'
     }
     
     for nome, modulo in moduli_necessari.items():
@@ -515,6 +529,122 @@ def plot_gdf_to_file(gdf, out_name, title, focus_bounds=None):
     plt.savefig(out_name, bbox_inches='tight', dpi=150)
     plt.close(fig)
 
+def genera_mappa_3d_particelle(gdf_part, comune, foglio):
+    """Genera una mappa 3D interattiva delle particelle usando Plotly"""
+    try:
+        if gdf_part.empty:
+            return None
+        
+        # Converti in EPSG:4326 per le coordinate geografiche
+        gdf_4326 = gdf_part.to_crs(epsg=4326)
+        
+        # Calcola il centro e i bounds
+        bounds = list(gdf_4326.total_bounds)
+        c_lon, c_lat = (bounds[0] + bounds[2]) / 2.0, (bounds[1] + bounds[3]) / 2.0
+        
+        # Crea una griglia per il terreno (simulazione altimetrica)
+        g_size = 100
+        lons_g = np.linspace(bounds[0], bounds[2], g_size)
+        lats_g = np.linspace(bounds[1], bounds[3], g_size)
+        LON, LAT = np.meshgrid(lons_g, lats_g)
+        
+        # Simulazione altimetria (valori di base per mancanza di dati reali)
+        # In un contesto reale, si userebbero dati Copernicus DEM
+        Z = np.ones((g_size, g_size)) * 100  # Altezza base di 100m
+        
+        # Aggiungi una leggera pendenza per simulare il terreno
+        Z += (LAT - c_lat) * 1000 + (LON - c_lon) * 1000
+        
+        # Crea la figura 3D
+        fig = go.Figure()
+        
+        # Aggiungi il terreno di base
+        fig.add_trace(go.Surface(
+            x=LON, y=LAT, z=Z,
+            colorscale='Earth',
+            showscale=False,
+            opacity=0.8,
+            name="Terreno"
+        ))
+        
+        # Aggiungi le particelle come poligoni 3D
+        for idx, row in gdf_4326.iterrows():
+            geom = row.geometry
+            particella = row.get('LABEL_CLEAN', row.get('LABEL', f'Part.{idx}'))
+            
+            if geom.geom_type == 'Polygon':
+                # Estrai le coordinate del poligono
+                x_coords, y_coords = geom.exterior.xy
+                z_coords = np.ones_like(x_coords) * (Z.mean() + 2)  # Leggermente sopra il terreno
+                
+                # Aggiungi il poligono come traccia 3D
+                fig.add_trace(go.Scatter3d(
+                    x=x_coords,
+                    y=y_coords,
+                    z=z_coords,
+                    mode='lines',
+                    line=dict(color='blue', width=3),
+                    name=f'Particella {particella}',
+                    showlegend=True
+                ))
+                
+                # Aggiungi l'etichetta al centroide
+                centroid = geom.centroid
+                fig.add_trace(go.Scatter3d(
+                    x=[centroid.x],
+                    y=[centroid.y],
+                    z=[z_coords.mean() + 1],
+                    mode='text',
+                    text=[str(particella)],
+                    textfont=dict(size=12, color='white', family='Arial Black'),
+                    showlegend=False
+                ))
+        
+        # Configura il layout
+        fig.update_layout(
+            title=dict(
+                text=f"<b>Mappa 3D - Comune: {comune} - Foglio: {foglio}</b>",
+                x=0.5,
+                font=dict(size=16, color='black')
+            ),
+            height=800,
+            margin=dict(l=0, r=0, b=0, t=40),
+            scene=dict(
+                aspectmode="manual",
+                aspectratio=dict(x=1.2, y=1.2, z=0.8),
+                camera=dict(
+                    eye=dict(x=1.5, y=1.5, z=1.2)
+                ),
+                xaxis=dict(
+                    title='Longitudine',
+                    showgrid=True,
+                    gridcolor='lightgray'
+                ),
+                yaxis=dict(
+                    title='Latitudine',
+                    showgrid=True,
+                    gridcolor='lightgray'
+                ),
+                zaxis=dict(
+                    title='Altitudine (m)',
+                    showgrid=True,
+                    gridcolor='lightgray',
+                    range=[Z.min() - 10, Z.max() + 20]
+                )
+            )
+        )
+        
+        # Salva come HTML
+        html_path = f"mappa_3d_{comune}_{foglio}.html".replace(" ", "_")
+        fig.write_html(html_path)
+        
+        return html_path
+        
+    except Exception as e:
+        print(f"Errore generazione mappa 3D: {e}")
+        return None
+
+
 def genera_mappe_fogli(dati_appezzamenti):
     """Genera mappe GIS per tutti i comuni presenti nei dati, supportando multiple regioni"""
     # Organizza i dati per comune e foglio
@@ -565,13 +695,19 @@ def genera_mappe_fogli(dati_appezzamenti):
                     if not gdf_part.empty:
                         gdf_wm = gdf_part.to_crs(epsg=3857)
                         lista_immagini_foglio = []
+                        lista_html_3d = []
                         
                         # 1. Mappa Panoramica
                         img_main = f"mappa_{comune_t}_{foglio_t}_main.png".replace(" ", "_")
                         plot_gdf_to_file(gdf_wm, img_main, f"Comune: {comune_t} - Fg: {foglio_t} (Panoramica)")
                         lista_immagini_foglio.append(img_main)
                         
-                        # 2. Divisione in Riquadri se l'area e' vasta (>1200m)
+                        # 2. Generazione Mappa 3D
+                        html_3d = genera_mappa_3d_particelle(gdf_part, comune_t, foglio_t)
+                        if html_3d:
+                            lista_html_3d.append(html_3d)
+                        
+                        # 3. Divisione in Riquadri se l'area e' vasta (>1200m)
                         minx, miny, maxx, maxy = gdf_wm.total_bounds
                         width, height = maxx - minx, maxy - miny
                         
@@ -592,7 +728,10 @@ def genera_mappe_fogli(dati_appezzamenti):
                                     plot_gdf_to_file(gdf_sub, img_sub, f"Comune: {comune_t} - Fg: {foglio_t} (Riquadro {i+1})", focus_bounds=fb)
                                     lista_immagini_foglio.append(img_sub)
                                     
-                        mappe_generate[(comune_t, foglio_t)] = lista_immagini_foglio
+                        mappe_generate[(comune_t, foglio_t)] = {
+                            'immagini_2d': lista_immagini_foglio,
+                            'mappe_3d': lista_html_3d
+                        }
         except Exception as e:
             print(f"Errore parsing GML {gml_path}: {e}")
 
@@ -702,8 +841,10 @@ def crea_report(dati_anag, dati_zoo, dati_app, mappe_img, out_path="Report_Campo
                 pdf.cell(0, 5, f" Particella {p['part']:<8} |  Superficie: {p['sup']:>8.4f} Ha  |  Utilizzo: {p['uso']}", ln=1)
             pdf.ln(4)
             
-            # Mappe (A larghezza di pagina)
-            imgs_per_foglio = mappe_img.get((comune, foglio), [])
+            # Mappe 2D (A larghezza di pagina)
+            foglio_data = mappe_img.get((comune, foglio), {})
+            imgs_per_foglio = foglio_data.get('immagini_2d', []) if isinstance(foglio_data, dict) else []
+            
             if not imgs_per_foglio:
                 pdf.set_font('Arial', 'I', 9)
                 pdf.cell(0, 6, "[Nessuna cartografia GIS trovata per questo foglio]", ln=1)
@@ -714,6 +855,23 @@ def crea_report(dati_anag, dati_zoo, dati_app, mappe_img, out_path="Report_Campo
                     pdf.image(img_path, x=10, w=190) # Larghezza piena
                     os.remove(img_path)
                     pdf.ln(5)
+            
+            # Mappe 3D - Aggiungi riferimenti nel PDF
+            html_3d_list = foglio_data.get('mappe_3d', []) if isinstance(foglio_data, dict) else []
+            if html_3d_list:
+                pdf.set_font('Arial', 'B', 10)
+                pdf.cell(0, 6, "Mappe 3D Interattive:", ln=1)
+                pdf.set_font('Arial', '', 8)
+                for html_path in html_3d_list:
+                    if pdf.get_y() > 180: pdf.add_page()
+                    pdf.cell(0, 5, f"- Mappa 3D disponibile: {os.path.basename(html_path)}", ln=1)
+                    # Non eliminare i file HTML 3D per permetterne la visualizzazione
+                    pdf.ln(2)
+            
+            # Pulizia file HTML 3D (opzionale, commentato per mantenerli)
+            # for html_path in html_3d_list:
+            #     if os.path.exists(html_path):
+            #         os.remove(html_path)
             
             pdf.set_draw_color(150, 150, 150)
             pdf.line(10, pdf.get_y(), 200, pdf.get_y())
